@@ -10,17 +10,40 @@
 use std::sync::{Arc, Mutex};
 use std::thread;
 
-/// Increment a counter concurrently using `n_threads` threads.
-/// Each thread increments the counter `count_per_thread` times.
-/// Returns the final counter value.
-///
-/// Hint: Use `Arc<Mutex<usize>>` as the shared counter.
 pub fn concurrent_counter(n_threads: usize, count_per_thread: usize) -> usize {
-    // TODO: Create Arc<Mutex<usize>> with initial value 0
-    // TODO: Spawn n_threads threads
-    // TODO: In each thread, lock() and increment count_per_thread times
-    // TODO: Join all threads, return final value
-    todo!()
+    // 1. 初始化共享的计数器
+    let counter = Arc::new(Mutex::new(0));
+
+    // ⭐ 新增：创建一个动态数组，用来收集所有子线程的“句柄 (Handle)”
+    let mut handles = vec![];
+
+    // 2. 派生 n_threads 个线程
+    for _ in 0..n_threads {
+        let counter = Arc::clone(&counter);
+
+        // ⭐ 修改：把派生出来的线程赋值给 handle 变量
+        let handle = thread::spawn(move || {
+            let mut counter = counter.lock().unwrap();
+
+            // 每个线程独立执行 count_per_thread 次累加
+            for _ in 0..count_per_thread {
+                *counter += 1;
+            }
+        });
+
+        // ⭐ 新增：把这个线程的句柄存进数组里
+        handles.push(handle);
+    }
+
+    // ⭐ 新增核心逻辑：主线程遍历数组，等待每一个子线程干完活
+    // 如果没有这一步，主线程会直接跑到底，返回一个残缺的数字 (通常是 0)
+    for handle in handles {
+        handle.join().unwrap();
+    }
+
+    // 3. 所有子线程都结束了，主线程最后一次拿锁，取出最终结果
+    let counter = counter.lock().unwrap();
+    *counter
 }
 
 /// Add elements to a shared vector concurrently using multiple threads.
@@ -29,10 +52,28 @@ pub fn concurrent_counter(n_threads: usize, count_per_thread: usize) -> usize {
 ///
 /// Hint: Use `Arc<Mutex<Vec<usize>>>`.
 pub fn concurrent_collect(n_threads: usize) -> Vec<usize> {
-    // TODO: Create Arc<Mutex<Vec<usize>>>
-    // TODO: Each thread pushes its own id
-    // TODO: After joining all threads, sort the result and return
-    todo!()
+    // 1. 初始化共享的向量
+    let shared_vec = Arc::new(Mutex::new(Vec::new()));
+
+    // ⭐ 新增：创建一个动态数组，用来收集所有子线程的“句柄 (Handle)”
+    let mut handles = vec![];
+    for i in 0..n_threads {
+        let shared_vec = Arc::clone(&shared_vec);
+        let handle = thread::spawn(move || {
+            let mut vec = shared_vec.lock().unwrap();
+            vec.push(i);
+        });
+        handles.push(handle);
+    }
+
+    // 等待所有子线程结束
+    for handle in handles {
+        handle.join().unwrap();
+    }
+    // 取出最终结果
+    let mut vec = shared_vec.lock().unwrap();
+    vec.sort();
+    vec.to_vec()
 }
 
 #[cfg(test)]
