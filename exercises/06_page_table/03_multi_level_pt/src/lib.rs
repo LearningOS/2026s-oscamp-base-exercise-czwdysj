@@ -94,73 +94,175 @@ impl Sv39PageTable {
         ppn
     }
 
+    // ------------------------------------------------------------------------
+    // 实验 1: 提取 VPN 索引 (extract_vpn)
+    // 目标: 从虚拟地址中提取指定层级的 VPN 索引。
+    // ------------------------------------------------------------------------
+
     /// 从 39 位虚拟地址中提取第 `level` 级的 VPN。
+    /// Extract VPN of `level` from 39-bit virtual address.
     ///
-    /// - level=2: 取 bits [38:30]
-    /// - level=1: 取 bits [29:21]
-    /// - level=0: 取 bits [20:12]
+    /// - level=2: 取 bits [38:30] / bits [38:30]
+    /// - level=1: 取 bits [29:21] / bits [29:21]
+    /// - level=0: 取 bits [20:12] / bits [20:12]
     ///
     /// 提示：右移 (12 + level * 9) 位，然后与 0x1FF 做掩码。
+    /// Hint: Right shift by (12 + level * 9) bits, then mask with 0x1FF.
     pub fn extract_vpn(va: u64, level: usize) -> usize {
-        // TODO: 从虚拟地址中提取指定级别的 VPN 索引
-        todo!()
+        // 计算每一级 VPN 的位移量：12 (页内偏移) + level * 9 (每级页表索引位)
+        ((va >> (12 + level * 9)) & 0x1FF) as usize
     }
+
+    // ------------------------------------------------------------------------
+    // 实验 2: 建立 4KB 页映射 (map_page)
+    // 目标: 实现三级页表的普通页映射。
+    // ------------------------------------------------------------------------
 
     /// 建立从虚拟页到物理页的映射（4KB 页）。
+    /// Map a virtual page to a physical page (4KB page).
     ///
-    /// 参数：
-    /// - `va`: 虚拟地址（会自动对齐到页边界）
-    /// - `pa`: 物理地址（会自动对齐到页边界）
-    /// - `flags`: 标志位（如 PTE_V | PTE_R | PTE_W）
+    /// 参数 / Parameters：
+    /// - `va`: 虚拟地址 / Virtual address (automatically aligned to page boundary)
+    /// - `pa`: 物理地址 / Physical address (automatically aligned to page boundary)
+    /// - `flags`: 标志位 / Flags (e.g., PTE_V | PTE_R | PTE_W)
     pub fn map_page(&mut self, va: u64, pa: u64, flags: u64) {
-        // TODO: 实现三级页表的映射
-        //
-        // 提示：你需要从根页表开始，逐级向下遍历页表层级（level 2 → level 1 → level 0）。
-        // 对于中间层级（level 2 和 level 1），如果对应 VPN 的页表项（PTE）无效（PTE_V == 0），
-        // 则需要分配一个新的页表节点（使用 alloc_node），并将新节点的 PPN 写入当前 PTE（仅设置 PTE_V 标志）。
-        // 最后在 level 0 的 PTE 中写入目标物理页号（pa >> 12）和 flags。
-        todo!()
+        let mut curr_ppn = self.root_ppn;
+
+        // 遍历 level 2 和 level 1，确保中间页表节点存在
+        for level in (1..=2).rev() {
+            let vpn = Self::extract_vpn(va, level);
+
+            // 先获取当前 PTE 的值，避免持续锁定 self.nodes
+            let pte = self.nodes.get(&curr_ppn).expect("Node must exist").entries[vpn];
+
+            if pte & PTE_V == 0 {
+                // 如果当前页表项无效，分配一个新的页表节点
+                let next_ppn = self.alloc_node();
+                // 重新获取可变引用并更新
+                let node = self.nodes.get_mut(&curr_ppn).expect("Node must exist");
+                node.entries[vpn] = (next_ppn << PPN_SHIFT) | PTE_V;
+                curr_ppn = next_ppn;
+            } else {
+                // 提取下一级页表的 PPN
+                curr_ppn = pte >> PPN_SHIFT;
+            }
+        }
+
+        // 在 level 0 写入最终的叶子节点映射
+        let vpn0 = Self::extract_vpn(va, 0);
+        let node0 = self
+            .nodes
+            .get_mut(&curr_ppn)
+            .expect("Level 0 node must exist");
+        node0.entries[vpn0] = ((pa >> 12) << PPN_SHIFT) | flags | PTE_V;
     }
+
+    // ------------------------------------------------------------------------
+    // 实验 3: 三级页表遍历翻译 (translate)
+    // 目标: 模拟硬件 MMU 的地址翻译过程。
+    // ------------------------------------------------------------------------
 
     /// 遍历三级页表，将虚拟地址翻译为物理地址。
+    /// Walk the 3-level page table to translate virtual address to physical address.
     ///
-    /// 步骤：
-    /// 1. 从根页表（root_ppn）开始
-    /// 2. 对每一级（2, 1, 0）：
-    ///    a. 用 VPN[level] 索引当前页表节点
-    ///    b. 如果 PTE 无效（!PTE_V），返回 PageFault
-    ///    c. 如果 PTE 是叶节点（R|W|X 有任一置位），提取 PPN 计算物理地址
-    ///    d. 否则用 PTE 中的 PPN 进入下一级页表
-    /// 3. level 0 的 PTE 必须是叶节点
+    /// 步骤 / Steps：
+    /// 1. 从根页表（root_ppn）开始 / Start from root_ppn.
+    /// 2. 对每一级（2, 1, 0）： / For each level (2, 1, 0):
+    ///    a. 用 VPN[level] 索引当前页表节点 / Index node with VPN[level].
+    ///    b. 如果 PTE 无效（!PTE_V），返回 PageFault / Return PageFault if PTE is invalid.
+    ///    c. 如果 PTE 是叶节点（R|W|X 有任一置位），提取 PPN 计算物理地址 / If leaf PTE, calculate PA.
+    ///    d. 否则用 PTE 中的 PPN 进入下一级页表 / Else move to next level using PPN.
+    /// 3. level 0 的 PTE 必须是叶节点 / Level 0 PTE must be a leaf.
     pub fn translate(&self, va: u64) -> TranslateResult {
-        // TODO: 实现三级页表遍历
-        //
-        // 提示：你需要从根页表开始，按 level 2 → level 1 → level 0 的顺序逐级遍历。
-        // 每一级都需要通过 VPN[level] 索引当前页表节点的条目（PTE）。
-        // 如果 PTE 无效（PTE_V == 0）则产生页错误（PageFault）。
-        // 如果 PTE 是叶节点（即 R、W、X 标志位中有至少一个被置位），则可以直接使用该 PTE 中的物理页号（PPN）计算最终的物理地址。
-        // 否则，该 PTE 指向下一级页表节点，继续遍历下一级。
-        // 遍历到 level 0 时，PTE 必须是叶节点。
-        todo!()
+        let mut curr_ppn = self.root_ppn;
+
+        for level in (0..=2).rev() {
+            let vpn = Self::extract_vpn(va, level);
+            let node = match self.nodes.get(&curr_ppn) {
+                Some(n) => n,
+                None => return TranslateResult::PageFault,
+            };
+
+            let pte = node.entries[vpn];
+            if pte & PTE_V == 0 {
+                return TranslateResult::PageFault;
+            }
+
+            // 检查 R/W/X 位，判断是否为叶子节点
+            if pte & (PTE_R | PTE_W | PTE_X) != 0 {
+                // 找到了叶子节点（可能是 4KB, 2MB 或 1GB 大页）
+                let ppn = pte >> PPN_SHIFT;
+                // 计算页内偏移掩码：
+                // level 0 (4KB) -> 低 12 位
+                // level 1 (2MB) -> 低 21 位
+                // level 2 (1GB) -> 低 30 位
+                let offset_mask = (1 << (12 + level * 9)) - 1;
+                let pa = (ppn << 12) | (va & offset_mask);
+                return TranslateResult::Ok(pa);
+            }
+
+            // 不是叶子节点，进入下一级
+            if level == 0 {
+                // 如果到了第 0 级还不是叶子，说明无效
+                return TranslateResult::PageFault;
+            }
+            curr_ppn = pte >> PPN_SHIFT;
+        }
+
+        TranslateResult::PageFault
     }
 
+    // ------------------------------------------------------------------------
+    // 实验 4: 建立 2MB 大页映射 (map_superpage)
+    // 目标: 实现三级页表中的大页映射。
+    // ------------------------------------------------------------------------
+
     /// 建立大页映射（2MB superpage，在 level 1 设叶子 PTE）。
+    /// Map a 2MB superpage (set leaf PTE at level 1).
     ///
     /// 2MB = 512 × 4KB，对齐要求：va 和 pa 都必须 2MB 对齐。
+    /// Alignment: va and pa must be 2MB-aligned.
     ///
     /// 与 map_page 类似，但只遍历到 level 1 就写入叶子 PTE。
+    /// Similar to map_page, but write leaf PTE at level 1.
     pub fn map_superpage(&mut self, va: u64, pa: u64, flags: u64) {
         let mega_size: u64 = (PAGE_SIZE * PT_ENTRIES) as u64; // 2MB
         assert_eq!(va % mega_size, 0, "va must be 2MB-aligned");
         assert_eq!(pa % mega_size, 0, "pa must be 2MB-aligned");
 
-        // TODO: 实现大页映射
-        //
-        // 提示：大页映射与普通页映射类似，但只需要遍历到 level 1。
-        // 你需要在 level 2 找到或创建中间页表节点，然后在 level 1 写入叶子 PTE。
-        // 注意大页的物理页号计算方式与普通页相同（pa >> 12），
-        // 但翻译时 offset 包含虚拟地址的低 21 位（VPN[0] 部分 + 12 位页内偏移）。
-        todo!()
+        // 1. 遍历 level 2，确保中间页表节点存在
+        let vpn2 = Self::extract_vpn(va, 2);
+
+        // 先获取根页表中的 PTE 值
+        let pte2 = self
+            .nodes
+            .get(&self.root_ppn)
+            .expect("Root node must exist")
+            .entries[vpn2];
+
+        let curr_ppn = if pte2 & PTE_V == 0 {
+            // 分配新节点
+            let next_ppn = self.alloc_node();
+            // 重新获取根页表并更新 PTE
+            let root_node = self
+                .nodes
+                .get_mut(&self.root_ppn)
+                .expect("Root node must exist");
+            root_node.entries[vpn2] = (next_ppn << PPN_SHIFT) | PTE_V;
+            next_ppn
+        } else {
+            pte2 >> PPN_SHIFT
+        };
+
+        // 2. 在 level 1 建立大页映射（叶子节点）
+        let vpn1 = Self::extract_vpn(va, 1);
+        let node1 = self
+            .nodes
+            .get_mut(&curr_ppn)
+            .expect("Level 1 node must exist");
+
+        // 设置标志位，由于设置了 R/W/X，它将成为一个 2MB 的大页叶子节点
+        node1.entries[vpn1] = ((pa >> 12) << PPN_SHIFT) | flags | PTE_V;
     }
 }
 

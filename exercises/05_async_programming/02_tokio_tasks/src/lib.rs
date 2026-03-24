@@ -14,10 +14,28 @@ use tokio::time::{sleep, Duration};
 ///
 /// Hint: Create `tokio::spawn` task for each i, collect JoinHandle, await them sequentially.
 pub async fn concurrent_squares(n: usize) -> Vec<usize> {
-    // TODO: Create n asynchronous tasks, each computing i * i
-    // TODO: Collect all JoinHandle
-    // TODO: Await each one to get result
-    todo!()
+    let mut handles = Vec::with_capacity(n);
+
+    // 步骤 1: 为每个数字 0..n 启动一个独立的异步任务
+    for i in 0..n {
+        // tokio::spawn 会立即将任务提交给运行时执行，并返回一个 JoinHandle
+        let handle: JoinHandle<usize> = tokio::spawn(async move {
+            i * i
+        });
+        handles.push(handle);
+    }
+
+    let mut results = Vec::with_capacity(n);
+    // 步骤 2: 顺序等待每个任务完成并收集结果
+    // 注意：虽然我们是顺序 await，但任务本身是在后台并发执行的
+    for handle in handles {
+        match handle.await {
+            Ok(res) => results.push(res),
+            Err(e) => panic!("Task panicked: {:?}", e),
+        }
+    }
+
+    results
 }
 
 /// Concurrently execute multiple "time-consuming" tasks (simulated with sleep), return all results.
@@ -25,10 +43,30 @@ pub async fn concurrent_squares(n: usize) -> Vec<usize> {
 ///
 /// Key: All tasks should execute concurrently, total duration should be close to single task duration, not sum of all tasks.
 pub async fn parallel_sleep_tasks(n: usize, duration_ms: u64) -> Vec<usize> {
-    // TODO: Create asynchronous task for each id in 0..n
-    // TODO: Each task sleeps specified duration and returns its own id
-    // TODO: Collect all results and sort
-    todo!()
+    let mut handles = Vec::with_capacity(n);
+
+    // 步骤 1: 启动 n 个睡眠任务
+    for i in 0..n {
+        let handle = tokio::spawn(async move {
+            // 模拟耗时操作
+            sleep(Duration::from_millis(duration_ms)).await;
+            i
+        });
+        handles.push(handle);
+    }
+
+    let mut results = Vec::with_capacity(n);
+    // 步骤 2: 等待所有睡眠任务完成
+    for handle in handles {
+        if let Ok(id) = handle.await {
+            results.push(id);
+        }
+    }
+
+    // 步骤 3: 排序结果，确保返回 [0, 1, 2, ...]
+    // 由于任务是并发执行的，完成顺序可能不固定
+    results.sort();
+    results
 }
 
 #[cfg(test)]

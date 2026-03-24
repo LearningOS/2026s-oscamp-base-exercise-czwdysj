@@ -1,24 +1,26 @@
 //! # TLB 模拟与刷新
+//! # TLB Simulation and Flushing
 //!
+//! This exercise simulates a TLB (Translation Lookaside Buffer), helping you understand its
+//! lookup, insertion, replacement, and flushing mechanisms.
 //! 本练习模拟 TLB（Translation Lookaside Buffer，地址翻译后备缓冲区），
 //! 帮助你理解 TLB 的查找、插入、替换和刷新机制。
 //!
+//! ## Key Points
 //! ## 知识点
-//! - TLB 是页表的硬件缓存，加速虚拟地址翻译
-//! - TLB 命中/未命中（hit/miss）
-//! - TLB 替换策略（本练习使用 FIFO）
-//! - TLB 刷新：全部刷新、按虚拟页刷新、按 ASID 刷新
-//! - ASID（Address Space Identifier）区分不同进程的地址空间
-//! - MMU 工作流程：先查 TLB，miss 则走页表，再回填 TLB
-//!
-//! ## TLB 条目结构
-//! ```text
-//! ┌───────┬──────┬──────┬───────┬───────┐
-//! │ valid │ asid │ vpn  │  ppn  │ flags │
-//! └───────┴──────┴──────┴───────┴───────┘
-//! ```
+//! - TLB is a hardware cache for page tables, accelerating virtual address translation.
+//!   TLB 是页表的硬件缓存，加速虚拟地址翻译。
+//! - TLB hit/miss. / TLB 命中/未命中（hit/miss）。
+//! - TLB replacement policy (FIFO used here). / TLB 替换策略（本练习使用 FIFO）。
+//! - TLB flushing: flush all, flush by VPN, flush by ASID.
+//!   TLB 刷新：全部刷新、按虚拟页刷新、按 ASID 刷新。
+//! - ASID (Address Space Identifier) distinguishes address spaces of different processes.
+//!   ASID（Address Space Identifier）区分不同进程的地址空间。
+//! - MMU workflow: check TLB first; if miss, walk page table and refill TLB.
+//!   MMU 工作流程：先查 TLB，miss 则走页表，再回填 TLB。
 
-/// TLB 条目
+/// TLB Entry structure
+/// TLB 条目结构
 #[derive(Clone, Debug)]
 pub struct TlbEntry {
     pub valid: bool,
@@ -40,6 +42,7 @@ impl TlbEntry {
     }
 }
 
+/// TLB Statistics
 /// TLB 统计信息
 #[derive(Debug, Default)]
 pub struct TlbStats {
@@ -58,16 +61,19 @@ impl TlbStats {
     }
 }
 
+/// Simulated TLB with fixed capacity and FIFO replacement policy.
 /// 模拟 TLB，固定大小，使用 FIFO 替换策略。
 pub struct Tlb {
     entries: Vec<TlbEntry>,
     capacity: usize,
+    /// FIFO pointer: next position to replace
     /// FIFO 指针：下次替换的位置
     fifo_ptr: usize,
     pub stats: TlbStats,
 }
 
 impl Tlb {
+    /// Create a TLB with the given `capacity`.
     /// 创建一个容量为 `capacity` 的 TLB。
     pub fn new(capacity: usize) -> Self {
         Self {
@@ -78,88 +84,141 @@ impl Tlb {
         }
     }
 
+    // ------------------------------------------------------------------------
+    // 实验 1: TLB 查找 (lookup)
+    // 目标: 在 TLB 中查找匹配的虚拟页号和地址空间标识符。
+    // ------------------------------------------------------------------------
+
+    /// Look up an entry matching `vpn` and `asid` in the TLB.
     /// 在 TLB 中查找匹配 `vpn` 和 `asid` 的条目。
     ///
-    /// 查找规则：
-    /// - 遍历所有条目
-    /// - 条目必须 `valid == true`
-    /// - 条目的 `vpn` 和 `asid` 都必须匹配
-    /// - 命中时增加 `stats.hits`，未命中增加 `stats.misses`
+    /// Rules / 查找规则：
+    /// - Iterate through all entries / 遍历所有条目
+    /// - Entry must be `valid == true` / 条目必须 `valid == true`
+    /// - Both `vpn` and `asid` must match / 条目的 `vpn` 和 `asid` 都必须匹配
+    /// - Increment `stats.hits` on hit, `stats.misses` on miss / 命中时增加 `stats.hits`，未命中增加 `stats.misses`
     ///
+    /// Returns `ppn` on hit, `None` on miss.
     /// 返回匹配条目的 `ppn`，未命中返回 None。
     pub fn lookup(&mut self, vpn: u64, asid: u16) -> Option<u64> {
-        // TODO: 遍历 self.entries，查找 valid && vpn 匹配 && asid 匹配的条目
-        // 命中：self.stats.hits += 1，返回 Some(entry.ppn)
-        // 未命中：self.stats.misses += 1，返回 None
-        todo!()
+        for entry in &self.entries {
+            if entry.valid && entry.vpn == vpn && entry.asid == asid {
+                self.stats.hits += 1;
+                return Some(entry.ppn);
+            }
+        }
+        self.stats.misses += 1;
+        None
     }
 
-    /// 将一条新映射插入 TLB。
+    // ------------------------------------------------------------------------
+    // 实验 2: TLB 插入与替换 (insert)
+    // 目标: 实现 TLB 的条目插入逻辑，包括更新已有条目和 FIFO 替换。
+    // ------------------------------------------------------------------------
+
+    /// Insert a new mapping into the TLB using FIFO replacement policy.
+    /// 将一条新映射插入 TLB，使用 FIFO 替换策略。
     ///
-    /// 使用 FIFO 替换策略：
-    /// 1. 先检查是否已存在相同 (vpn, asid) 的有效条目，如果有则更新它
-    /// 2. 否则，写入 `fifo_ptr` 指向的位置
-    /// 3. 将 `fifo_ptr` 前进到下一个位置（循环：`(fifo_ptr + 1) % capacity`）
+    /// 1. Check if a valid entry with the same (vpn, asid) exists; if so, update it.
+    ///    先检查是否已存在相同 (vpn, asid) 的有效条目，如果有则更新它。
+    /// 2. Otherwise, write to the position pointed to by `fifo_ptr`.
+    ///    否则，写入 `fifo_ptr` 指向的位置。
+    /// 3. Advance `fifo_ptr` to the next position (circularly).
+    ///    将 `fifo_ptr` 前进到下一个位置（循环：`(fifo_ptr + 1) % capacity`）。
     pub fn insert(&mut self, vpn: u64, ppn: u64, asid: u16, flags: u64) {
-        // TODO: 实现 TLB 插入
-        // 提示：
-        //   先查找已有条目：
-        //   for entry in &mut self.entries {
-        //       if entry.valid && entry.vpn == vpn && entry.asid == asid { 更新并返回 }
-        //   }
-        //   写入 fifo_ptr 位置，然后推进指针
-        todo!()
+        // First, try to find and update an existing entry
+        // 首先，尝试查找并更新现有条目
+        for entry in &mut self.entries {
+            if entry.valid && entry.vpn == vpn && entry.asid == asid {
+                entry.ppn = ppn;
+                entry.flags = flags;
+                return;
+            }
+        }
+
+        // If not found, use FIFO to replace an entry
+        // 如果未找到，使用 FIFO 替换一个条目
+        let ptr = self.fifo_ptr;
+        self.entries[ptr] = TlbEntry {
+            valid: true,
+            asid,
+            vpn,
+            ppn,
+            flags,
+        };
+        self.fifo_ptr = (ptr + 1) % self.capacity;
     }
 
+    // ------------------------------------------------------------------------
+    // 实验 3: TLB 刷新 (flush)
+    // 目标: 实现不同粒度的 TLB 刷新操作。
+    // ------------------------------------------------------------------------
+
+    /// Flush the entire TLB (mark all entries as invalid).
     /// 刷新整个 TLB（将所有条目标记为无效）。
     ///
+    /// Corresponds to RISC-V `sfence.vma` (no arguments).
     /// 这对应于 RISC-V 的 `sfence.vma`（不带参数）操作。
     pub fn flush_all(&mut self) {
-        // TODO: 将所有条目的 valid 设为 false
-        todo!()
+        for entry in &mut self.entries {
+            entry.valid = false;
+        }
     }
 
+    /// Flush TLB entries for a specific virtual page.
     /// 刷新指定虚拟页的 TLB 条目。
     ///
+    /// Corresponds to `sfence.vma vaddr` (all ASIDs matching `vpn`).
     /// 对应 `sfence.vma vaddr`：只刷新匹配 `vpn` 的条目（任意 ASID）。
     pub fn flush_by_vpn(&mut self, vpn: u64) {
-        // TODO: 将所有 vpn 匹配的条目标记为无效
-        todo!()
+        for entry in &mut self.entries {
+            if entry.vpn == vpn {
+                entry.valid = false;
+            }
+        }
     }
 
+    /// Flush all TLB entries for a specific address space (ASID).
     /// 刷新指定地址空间（ASID）的所有 TLB 条目。
     ///
+    /// Corresponds to `sfence.vma zero, asid`.
     /// 对应 `sfence.vma zero, asid`：刷新该 ASID 的所有条目。
     pub fn flush_by_asid(&mut self, asid: u16) {
-        // TODO: 将所有 asid 匹配的条目标记为无效
-        todo!()
+        for entry in &mut self.entries {
+            if entry.asid == asid {
+                entry.valid = false;
+            }
+        }
     }
 
+    /// Return the count of currently valid entries.
     /// 返回当前有效条目的数量。
     pub fn valid_count(&self) -> usize {
-        // TODO: 统计 valid == true 的条目数
-        todo!()
+        self.entries.iter().filter(|e| e.valid).count()
     }
 }
 
-/// 页表项（简化版，用于 MMU 模拟）
+/// Simplified page mapping for MMU simulation.
+/// 页映射（简化版，用于 MMU 模拟）
 pub struct PageMapping {
     pub vpn: u64,
     pub ppn: u64,
     pub flags: u64,
 }
 
+/// Simulated MMU containing a TLB and a simple page table.
 /// 模拟的 MMU：包含 TLB 和一个简单的页表。
 ///
-/// MMU 翻译流程：
-/// 1. 先查 TLB（lookup）
-/// 2. TLB 命中 → 直接返回物理页号
-/// 3. TLB 未命中 → 遍历页表查找（walk page table）
-/// 4. 页表命中 → 将结果回填到 TLB（insert），然后返回
-/// 5. 页表也未命中 → 缺页（None）
+/// MMU Translation Workflow / MMU 翻译流程：
+/// 1. Check TLB first (lookup). / 先查 TLB（lookup）。
+/// 2. TLB hit -> return PPN directly. / TLB 命中 → 直接返回物理页号。
+/// 3. TLB miss -> walk page table. / TLB 未命中 → 遍历页表查找（walk page table）。
+/// 4. Page table hit -> refill TLB (insert) and return. / 页表命中 → 将结果回填到 TLB（insert），然后返回。
+/// 5. Page table miss -> Page Fault (None). / 页表也未命中 → 缺页（None）。
 pub struct Mmu {
     pub tlb: Tlb,
-    /// 简化的页表：(vpn, asid) -> PageMapping
+    /// Simplified page table: (asid, PageMapping)
+    /// 简化的页表：(asid, PageMapping)
     page_table: Vec<(u16, PageMapping)>,
     pub current_asid: u16,
 }
@@ -173,28 +232,58 @@ impl Mmu {
         }
     }
 
+    /// Add a mapping to the page table.
     /// 在页表中添加一条映射。
     pub fn add_mapping(&mut self, asid: u16, vpn: u64, ppn: u64, flags: u64) {
         self.page_table
             .push((asid, PageMapping { vpn, ppn, flags }));
     }
 
+    /// Switch current address space (ASID).
     /// 切换当前地址空间（ASID）。
     pub fn switch_asid(&mut self, new_asid: u16) {
         self.current_asid = new_asid;
     }
 
+    // ------------------------------------------------------------------------
+    // 实验 4: MMU 地址翻译模拟 (translate)
+    // 目标: 整合 TLB 查找和页表回填逻辑。
+    // ------------------------------------------------------------------------
+
+    /// Simulate MMU address translation.
     /// 模拟 MMU 地址翻译。
     ///
-    /// 流程：
-    /// 1. 使用 `self.current_asid` 和 `vpn` 查找 TLB
-    /// 2. TLB 命中 → 返回 Some(ppn)
-    /// 3. TLB 未命中 → 在 `self.page_table` 中查找匹配 (current_asid, vpn) 的条目
-    /// 4. 页表命中 → 回填 TLB（insert），返回 Some(ppn)
-    /// 5. 页表未命中 → 返回 None（缺页）
+    /// 1. Look up TLB with `current_asid` and `vpn`.
+    ///    使用 `self.current_asid` 和 `vpn` 查找 TLB。
+    /// 2. TLB hit -> return Some(ppn).
+    ///    TLB 命中 → 返回 Some(ppn)。
+    /// 3. TLB miss -> search `self.page_table` for (current_asid, vpn).
+    ///    TLB 未命中 → 在 `self.page_table` 中查找匹配 (current_asid, vpn) 的条目。
+    /// 4. Page table hit -> refill TLB (insert), return Some(ppn).
+    ///    页表命中 → 回填 TLB（insert），返回 Some(ppn)。
+    /// 5. Page table miss -> return None (Page Fault).
+    ///    页表未命中 → 返回 None（缺页）。
     pub fn translate(&mut self, vpn: u64) -> Option<u64> {
-        // TODO: 实现 TLB + 页表的二级查找
-        todo!()
+        // Step 1: Check TLB
+        if let Some(ppn) = self.tlb.lookup(vpn, self.current_asid) {
+            return Some(ppn);
+        }
+
+        // Step 2: TLB miss, search page table
+        let asid = self.current_asid;
+        let mapping = self
+            .page_table
+            .iter()
+            .find(|(a, m)| *a == asid && m.vpn == vpn);
+
+        if let Some((_, m)) = mapping {
+            // Step 3: Page table hit, refill TLB
+            self.tlb.insert(m.vpn, m.ppn, asid, m.flags);
+            Some(m.ppn)
+        } else {
+            // Step 4: Page table miss
+            None
+        }
     }
 }
 
