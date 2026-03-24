@@ -260,7 +260,7 @@ impl Mmu {
     /// 3. TLB miss -> search `self.page_table` for (current_asid, vpn).
     ///    TLB 未命中 → 在 `self.page_table` 中查找匹配 (current_asid, vpn) 的条目。
     /// 4. Page table hit -> refill TLB (insert), return Some(ppn).
-    ///    页表命中 → 回填 TLB（insert），返回 Some(ppn)。
+    ///    页表命中 → 回填 TLB（insert），返回 Some(ppn)。。。。
     /// 5. Page table miss -> return None (Page Fault).
     ///    页表未命中 → 返回 None（缺页）。
     pub fn translate(&mut self, vpn: u64) -> Option<u64> {
